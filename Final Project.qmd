@@ -1,0 +1,981 @@
+---
+title: "Final_Project"
+format: 
+  pdf:
+    toc: true
+    embed-resources: true
+    code-line-numbers: true
+    theme: yeti
+    include-in-header: 
+      text: |
+        \usepackage{tocloft}
+        \setlength{\cftbeforesecskip}{8pt}
+        \usepackage{etoolbox}
+        \apptocmd{\tableofcontents}{\clearpage}{}{}
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{R}
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+library(tidymodels)
+library(naniar)
+library(caret)
+library(glmnet)
+setwd("~/Desktop/SMU/STAT 6302/Project")
+cpbl2005=read.csv("2005CPBL.csv")
+cpbl2006=read.csv("2006CPBL.csv")
+cpbl2007=read.csv("2007CPBL.csv")
+cpbl2008=read.csv("2008CPBL.csv")
+cpbl2009=read.csv("2009CPBL.csv")
+cpbl2010=read.csv("2010CPBL.csv")
+cpbl2011=read.csv("2011CPBL.csv")
+cpbl2012=read.csv("2012CPBL.csv")
+cpbl2013=read.csv("2013CPBL.csv")
+cpbl2014=read.csv("2014CPBL.csv")
+cpbl2015=read.csv("2015CPBL.csv")
+cpbl2016=read.csv("2016CPBL.csv")
+cpbl2017=read.csv("2017CPBL.csv")
+cpbl2018=read.csv("2018CPBL.csv")
+cpbl2019=read.csv("2019CPBL.csv")
+cpbl2020=read.csv("2020CPBL.csv")
+cpbl2021=read.csv("2021CPBL.csv")
+cpbl2022=read.csv("2022CPBL.csv")
+cpbl2023=read.csv("2023CPBL.csv")
+cpbl2024=read.csv("2024CPBL.csv")
+cpbl2025=read.csv("2025CPBL.csv")
+cpblall=rbind(cpbl2005,cpbl2006,cpbl2007,cpbl2008,cpbl2009,cpbl2010,cpbl2011,cpbl2012,cpbl2013,cpbl2014,cpbl2015,cpbl2016,cpbl2017,cpbl2018,cpbl2019,cpbl2020,cpbl2021,cpbl2022,cpbl2023,cpbl2024,cpbl2025)
+cpblall=cpblall[order(cpblall$Name, cpblall$Year),]
+
+cpblmod=cpblall |>
+     group_by(Name) |>
+     mutate(
+         next_year=lead(Year),
+         HR_tplus1=if_else(next_year==Year+1, lead(HR), NA_real_),
+         OBP_tplus1=if_else(next_year==Year+1, lead(OBP), NA_real_),
+         SLG_tplus1=if_else(next_year==Year+1,
+lead(SLG), NA_real_),
+          OPS_tplus1 = OBP_tplus1 + SLG_tplus1) |>
+     ungroup()
+
+
+
+#split train/test data
+cpbl=cpblmod |>
+     filter(!is.na(HR_tplus1),
+            !is.na(OBP_tplus1),
+            !is.na(SLG_tplus1)
+            ) |>
+  mutate(
+    logHR_tplus1=log1p(HR_tplus1)
+  )
+
+cpbl_split=make_splits(
+  cpbl |> filter(Year <=2022),
+  cpbl |> filter(Year >= 2022))
+
+cpbltrain=training(cpbl_split)
+cpbltest=testing(cpbl_split)
+
+
+cpblpre=cpblmod |>
+  filter(Year==2025) |>
+  mutate(
+    logHR_tplus1=NA
+  )
+
+cpblpre=cpblpre[-22,]
+
+#hr嚴重右傾!!!
+```
+
+```{R, include=FALSE}
+#recipe for HR
+hr_rec=recipe(logHR_tplus1~., data=cpbltrain) |>
+  update_role(Name, new_role = "ID") |>
+  update_role(Year, new_role = "ID") |>
+  step_mutate(
+    ISO=SLG-BA,
+    HRrate=HR/PA,
+    BBrate= BB/PA,
+    SOrate= SO/PA,
+    X1B=H-X2B-X3B-HR,
+    xSLG=(X1B + X2B*2 + X3B*3 + HR*4)/AB,
+    xBH=X2B+X3B+HR,
+    xBHrate=xBH/PA,
+    ISOHR=ISO*HR,
+    HRperH=HR/H) |>
+  step_rm(next_year, OBP_tplus1, SLG_tplus1, OPS_tplus1, GDP, SF, SH, HBP, BA, OBP, CS, SB, X3B, H, R, Tm, X1B, HR_tplus1, SLG, SO, BB, TB, xBH, PA, AB, G, RBI) |>
+  step_ns(Age, deg_free = tune()) |>
+  step_normalize(all_predictors())
+  
+#hr_prep=prep(hr_rec)
+#hr_juice=juice(hr_prep)
+```
+
+```{R,include=FALSE}
+#recipe for OBP  
+  
+obp_rec=recipe(OBP_tplus1~., data=cpbltrain) |>
+  update_role(Name, new_role = "ID") |>
+  update_role(Year, new_role = "ID") |>
+  step_mutate(
+    BBrate= BB/PA,
+    SOrate= SO/PA,
+    BBK=BB/SO,
+    X1B=H-X2B-X3B-HR,
+    wOBA_like=(0.69*BB + 0.72*HBP + 0.89*X1B +
+             1.27*X2B + 1.62*X3B + 2.10*HR) /
+            (AB + BB + HBP + SF),
+    BABIP=(H-HR)/(AB-SO-HR+SF)) |>
+  step_rm(next_year, OPS_tplus1, SLG_tplus1, HR_tplus1, logHR_tplus1, GDP, SF, SH, CS, R, Tm, RBI, SLG, OPS, HBP, IBB, HR, SB, BB, SO, X1B, X2B, X3B, PA, AB, H, G) |>
+  step_ns(Age, deg_free = tune()) |>
+    step_normalize(all_predictors())
+```
+
+```{R,include=FALSE}
+#recipe for SLG:
+slg_rec=recipe(SLG_tplus1~., data=cpbltrain) |>
+  update_role(Name, new_role = "ID") |>
+  update_role(Year, new_role = "ID") |>
+  step_mutate(
+    ISO=SLG-BA,
+    HRrate=HR/PA,
+    X1B=H-X2B-X3B-HR,
+    wRC_like=(BB+HBP+H+1.5*X2B+2*X3B+2.5*HR)/PA,
+    xBHratio=(X2B+X3B+HR)/H,
+    power_rate=(2*X2B+3*X3B+4*HR)/PA) |>
+  step_rm(next_year, OBP_tplus1, HR_tplus1, OPS_tplus1, logHR_tplus1, GDP, SF, SH, HBP, OBP, CS, SB, R, Tm, RBI, BB, SO, OPS, IBB, H, PA, AB, G, TB) |>
+  step_ns(Age, deg_free = tune()) |>
+  step_normalize(all_predictors())
+```
+
+```{R,include=FALSE}
+#resampling method
+set.seed(123)
+year_split=function(data, train_years, vali_years){
+  train_idx=which(data$Year %in% train_years)
+  vali_idx=which(data$Year %in% vali_years)
+  make_splits(
+    list(analysis=train_idx, assessment=vali_idx),
+    data=data
+  )
+}
+
+
+split1=year_split(cpbltrain, train_years = 2005:2006, vali_years = 2007)
+split2=year_split(cpbltrain, train_years = 2005:2007, vali_years = 2008)
+split3=year_split(cpbltrain, train_years = 2005:2008, vali_years = 2009)
+split4=year_split(cpbltrain, train_years = 2005:2009, vali_years = 2010)
+split5=year_split(cpbltrain, train_years = 2005:2010, vali_years = 2011)
+split6=year_split(cpbltrain, train_years = 2005:2011, vali_years = 2012)
+split7=year_split(cpbltrain, train_years = 2005:2012, vali_years = 2013)
+split8=year_split(cpbltrain, train_years = 2005:2013, vali_years = 2014)
+split9=year_split(cpbltrain, train_years = 2005:2014, vali_years = 2015)
+split10=year_split(cpbltrain, train_years = 2005:2015, vali_years = 2016)
+split11=year_split(cpbltrain, train_years = 2005:2016, vali_years = 2017)
+split12=year_split(cpbltrain, train_years = 2005:2017, vali_years = 2018)
+split13=year_split(cpbltrain, train_years = 2005:2018, vali_years = 2019)
+split14=year_split(cpbltrain, train_years = 2005:2019, vali_years = 2020)
+split15=year_split(cpbltrain, train_years = 2005:2020, vali_years = 2021)
+
+
+cpblrollingfolds=manual_rset(
+  splits=list(split1,split2,split3,split4,split5,split6,split7,split8,split9,split10,split11,split12,split13,split14,split15),
+  ids=c(
+    "2005-2006 to 2007",
+    "2005-2007 to 2008",
+    "2005-2008 to 2009",
+    "2005-2009 to 2010",
+    "2005-2010 to 2011",
+    "2005-2011 to 2012",
+    "2005-2012 to 2013",
+    "2005-2013 to 2014",
+    "2005-2014 to 2015",
+    "2005-2015 to 2016",
+    "2005-2016 to 2017",
+    "2005-2017 to 2018",
+    "2005-2018 to 2019",
+    "2005-2019 to 2020",
+    "2005-2020 to 2021"
+  )
+)
+```
+
+```{R,include=FALSE}
+#Elastic Model for HR:
+en_glmnet=linear_reg(
+                  penalty = tune(), 
+                  mixture = tune()) |> 
+                  set_mode("regression") |>
+                  set_engine("glmnet") 
+
+hr_en_wf=workflow() |> 
+            add_recipe(hr_rec) |> 
+            add_model(en_glmnet)
+
+hr_en_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  mixture(),
+  levels=10
+)
+
+set.seed(123)
+
+hr_en_tune=tune_grid(
+              hr_en_wf,
+              resamples=cpblrollingfolds,
+              grid=hr_en_grid,
+              metrics=metric_set(rmse))
+
+hr_en_tune |> show_best(metric="rmse")
+
+hr_en_best_tune=hr_en_tune |> select_best(metric="rmse")
+
+hr_en_best_tune
+
+hr_en_final_workflow=hr_en_wf |> 
+                finalize_workflow(hr_en_best_tune)
+
+hr_en_coef=hr_en_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+hr_en_coef
+```
+
+```{R,include=FALSE}
+#Lasso Model for HR:
+lasso_glmnet=linear_reg(
+                  penalty = tune(), 
+                  mixture = 1) |> 
+                  set_mode("regression") |>
+                  set_engine("glmnet") 
+
+hr_lasso_wf=workflow() |> 
+            add_recipe(hr_rec) |> 
+            add_model(lasso_glmnet)
+
+hr_lasso_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=50
+)
+
+set.seed(123)
+
+hr_lasso_tune=tune_grid(
+              hr_lasso_wf,
+              resamples=cpblrollingfolds,
+              grid=hr_lasso_grid,
+              metrics=metric_set(rmse))
+              
+hr_lasso_tune |> show_best(metric="rmse")
+
+hr_lasso_best_tune=hr_lasso_tune |> select_best(metric="rmse")
+
+hr_lasso_final_workflow=hr_lasso_wf |> 
+                finalize_workflow(hr_lasso_best_tune)
+
+hr_lasso_coef=hr_lasso_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+hr_lasso_coef  
+```
+
+```{R,include=FALSE}
+# Ridge model for HR:
+ridge_glmnet=linear_reg(
+                  penalty = tune(), 
+                  mixture = 0) |> 
+                  set_mode("regression") |>
+                  set_engine("glmnet") 
+
+hr_ridge_wf=workflow() |> 
+            add_recipe(hr_rec) |> 
+            add_model(ridge_glmnet)
+
+hr_ridge_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=50
+)
+
+set.seed(123)
+
+hr_ridge_tune=tune_grid(
+              hr_ridge_wf,
+              resamples=cpblrollingfolds,
+              grid=hr_ridge_grid,
+              metrics=metric_set(rmse))
+              
+hr_ridge_tune |> show_best(metric="rmse")
+
+hr_ridge_best_tune=hr_ridge_tune |> select_best(metric="rmse")
+
+hr_ridge_final_workflow=hr_ridge_wf |> 
+                finalize_workflow(hr_ridge_best_tune)
+
+#hr_ridge_coef=hr_ridge_final_workflow |>
+  #fit(cpbltrain) |>
+  #extract_fit_parsnip() |>
+  #tidy()
+
+#hr_ridge_coef  
+```
+
+```{R,include=FALSE}
+#Elastic Model for OBP:
+
+obp_en_wf=workflow() |> 
+            add_recipe(obp_rec) |> 
+            add_model(en_glmnet)
+
+obp_en_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  mixture(),
+  levels=10
+)
+
+set.seed(123)
+
+obp_en_tune=tune_grid(
+              obp_en_wf,
+              resamples=cpblrollingfolds,
+              grid=obp_en_grid,
+              metrics=metric_set(rmse))
+
+obp_en_tune |> show_best(metric="rmse")
+
+obp_en_best_tune=obp_en_tune |> select_best(metric="rmse")
+
+obp_en_best_tune
+
+obp_en_final_workflow=obp_en_wf |> 
+                finalize_workflow(obp_en_best_tune)
+
+obp_en_coef=obp_en_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+obp_en_coef
+```
+
+```{R,include=FALSE}
+#Lasso Model for OBP:
+obp_lasso_wf=workflow() |> 
+            add_recipe(obp_rec) |> 
+            add_model(lasso_glmnet)
+
+obp_lasso_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=100
+)
+
+set.seed(123)
+
+obp_lasso_tune=tune_grid(
+              obp_lasso_wf,
+              resamples=cpblrollingfolds,
+              grid=obp_lasso_grid,
+              metrics=metric_set(rmse))
+              
+obp_lasso_tune |> show_best(metric="rmse")
+
+obp_lasso_best_tune=obp_lasso_tune |> select_best(metric="rmse")
+
+obp_lasso_final_workflow=obp_lasso_wf |> 
+                finalize_workflow(obp_lasso_best_tune)
+
+obp_lasso_coef=obp_lasso_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+obp_lasso_coef
+```
+
+```{R,include=FALSE}
+#Ridge Model for OBP:
+obp_ridge_wf=workflow() |> 
+            add_recipe(obp_rec) |> 
+            add_model(ridge_glmnet)
+
+obp_ridge_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=100
+)
+
+set.seed(123)
+
+obp_ridge_tune=tune_grid(
+              obp_ridge_wf,
+              resamples=cpblrollingfolds,
+              grid=obp_ridge_grid,
+              metrics=metric_set(rmse))
+              
+obp_ridge_tune |> show_best(metric="rmse")
+
+obp_ridge_best_tune=obp_ridge_tune |> select_best(metric="rmse")
+
+obp_ridge_final_workflow=obp_ridge_wf |> 
+                finalize_workflow(obp_ridge_best_tune)
+
+obp_ridge_coef=obp_ridge_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+obp_ridge_coef
+```
+
+```{R,include=FALSE}
+#Elastic Net model for SLG:
+
+slg_en_wf=workflow() |> 
+            add_recipe(slg_rec) |> 
+            add_model(en_glmnet)
+
+slg_en_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  mixture(),
+  levels=10
+)
+
+set.seed(123)
+
+slg_en_tune=tune_grid(
+              slg_en_wf,
+              resamples=cpblrollingfolds,
+              grid=slg_en_grid,
+              metrics=metric_set(rmse))
+
+slg_en_tune |> show_best(metric="rmse")
+
+slg_en_best_tune=slg_en_tune |> select_best(metric="rmse")
+
+slg_en_best_tune
+
+slg_en_final_workflow=slg_en_wf |> 
+                finalize_workflow(slg_en_best_tune)
+
+slg_en_coef=slg_en_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+slg_en_coef
+```
+
+```{R,include=FALSE}
+slg_lasso_wf=workflow() |> 
+            add_recipe(slg_rec) |> 
+            add_model(lasso_glmnet)
+
+slg_lasso_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=100
+)
+
+set.seed(123)
+
+slg_lasso_tune=tune_grid(
+              slg_lasso_wf,
+              resamples=cpblrollingfolds,
+              grid=slg_lasso_grid,
+              metrics=metric_set(rmse))
+              
+slg_lasso_tune |> show_best(metric="rmse")
+
+slg_lasso_best_tune=slg_lasso_tune |> select_best(metric="rmse")
+
+slg_lasso_final_workflow=slg_lasso_wf |> 
+                finalize_workflow(slg_lasso_best_tune)
+
+slg_lasso_coef=slg_lasso_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+slg_lasso_coef
+```
+
+```{R,include=FALSE}
+slg_ridge_wf=workflow() |> 
+            add_recipe(slg_rec) |> 
+            add_model(ridge_glmnet)
+
+slg_ridge_grid=grid_regular(
+  deg_free(range=c(1,5)),
+  penalty(range=c(-5, 0)),
+  levels=100
+)
+
+set.seed(123)
+
+slg_ridge_tune=tune_grid(
+              slg_ridge_wf,
+              resamples=cpblrollingfolds,
+              grid=slg_ridge_grid,
+              metrics=metric_set(rmse))
+              
+slg_ridge_tune |> show_best(metric="rmse")
+
+slg_ridge_best_tune=slg_ridge_tune |> select_best(metric="rmse")
+
+slg_ridge_final_workflow=slg_ridge_wf |> 
+                finalize_workflow(slg_ridge_best_tune)
+
+slg_ridge_coef=slg_ridge_final_workflow |>
+  fit(cpbltrain) |>
+  extract_fit_parsnip() |>
+  tidy()
+
+slg_ridge_coef
+```
+
+```{R,include=FALSE}
+# test RMSE
+hr_last_fit=last_fit(
+  hr_en_final_workflow, 
+  cpbl_split)
+
+hr_test_rmse=hr_last_fit |> collect_metrics()
+hr_test_rmse
+
+obp_last_fit=last_fit(
+  obp_ridge_final_workflow, 
+  cpbl_split)
+
+obp_test_rmse=obp_last_fit |> collect_metrics()
+obp_test_rmse
+
+slg_last_fit=last_fit(
+  slg_ridge_final_workflow, 
+  cpbl_split)
+
+slg_test_rmse=slg_last_fit |> collect_metrics()
+slg_test_rmse
+
+hr_pred=collect_predictions(hr_last_fit)
+hr_pred
+```
+
+```{R,include=FALSE}
+#Prediction!!!!
+
+hr_final_model=fit(
+  hr_lasso_final_workflow,
+  data=cpbltrain
+)
+
+obp_final_model=fit(
+  obp_ridge_final_workflow,
+  data=cpbltrain
+)
+
+slg_final_model=fit(
+  slg_en_final_workflow,
+  data=cpbltrain
+)
+
+hr_2026=cpblpre |>
+  dplyr::select(Name, Year) |>
+  bind_cols(
+    predict(hr_final_model, cpblpre) |>
+    mutate(hr_pred=expm1(.pred))  
+  )
+ 
+obp_2026=cpblpre |>
+  dplyr::select(Name, Year) |>
+  bind_cols(
+    predict(obp_final_model,cpblpre) |>
+    rename(obp_pred=.pred)
+)
+
+slg_2026=cpblpre |>
+  dplyr::select(Name, Year) |>
+  bind_cols(predict(slg_final_model,cpblpre) |>
+  rename(slg_pred=.pred)           
+)
+
+final_2026=hr_2026 |>
+  dplyr::select(Name, Year, hr_pred) |>
+  left_join(obp_2026 |> dplyr::select(Name, Year, obp_pred), by=c("Name", "Year")) |>
+  left_join(slg_2026 |> dplyr::select(Name, Year, slg_pred), by=c("Name", "Year")) |>
+  mutate(
+    ops_pred=obp_pred+slg_pred
+  )
+
+final_2026=final_2026 |>
+  mutate(Year=2026,
+         hr_pred=round(hr_pred),
+         obp_pred=round(obp_pred,3),
+         slg_pred=round(slg_pred,3),
+         ops_pred=round(ops_pred,3)
+)
+
+
+#well some players' HR numbers are worse than I expect...
+
+
+hist(cpbltrain$PA)
+median(cpbltrain$PA)
+
+final_2026_hrstd=hr_2026 |>
+  dplyr::select(Name, Year, hr_pred) |>
+  left_join(obp_2026 |> dplyr::select(Name, Year, obp_pred), by=c("Name", "Year")) |>
+  left_join(slg_2026 |> dplyr::select(Name, Year, slg_pred), by=c("Name", "Year")) |>
+  left_join(cpblpre |> dplyr::select(Name, PA), by="Name") |>
+  mutate(
+    Year=2026,
+    ops_pred=obp_pred+slg_pred
+  )
+
+final_2026_hrstd=final_2026_hrstd |>
+  mutate(hrrate_pred=hr_pred/PA,
+         hr_std=round(hrrate_pred*450),
+         obp_pred=round(obp_pred,3),
+         slg_pred=round(slg_pred,3),
+         ops_pred=round(ops_pred,3)
+) |> dplyr::select(Name, Year, hr_std, obp_pred, slg_pred, ops_pred)
+```
+
+\clearpage
+# Introduction
+
+As a baseball fan, I have observed that preseason projection systems have become an important and well-developed analytical tool in Major League Baseball (MLB). Websites such as Fangraphs provide player projections before each season and serve as a major discussion topic among fans and analysts, including predictions for home run leaders, OPS performance, and overall player value.
+
+In contrast, Taiwan’s professional baseball, the Chinese Professional Baseball League (CPBL) currently lacks a comparable systematic projection platform, and relatively few player projections are developed using statistical modeling approaches. Therefore, this project aims to combine statistical modeling techniques with my personal interest in baseball to develop a simplified preseason projection system for CPBL hitters.
+
+This study focuses on hitter performance prediction because, compared to pitchers, hitter statistics are one of the primary topics discussed the most among Taiwanese baseball fans. The main objective of this project is to predict several key offensive metrics for CPBL hitters in the 2026 season, including home runs (HR), on-base percentage (OBP), slugging percentage (SLG), and OPS.
+
+The following sections describe the data processing procedures and modeling methods used in this study.
+
+# Data
+
+The data used in this study were obtained from Baseball Reference, which is currently one of the few publicly available sources that provides comprehensive English-language statistics for the Chinese Professional Baseball League (CPBL). A total of 1,284 observations and 27 columns from 2005 to 2025 were collected for this study.
+
+Because Baseball Reference primarily uses at-bats (AB) as the qualification threshold for CPBL batting leaderboards, AB was also used as the minimum playing-time requirement in this study. In addition, the CPBL season consisted of only 100 games from 2005 to 2008, compared to the later 120-game format. Therefore, the minimum qualification threshold for those four seasons was adjusted to AB ≥ 100, while all remaining seasons used AB ≥ 120 in order to maintain relatively consistent playing-time proportions across different eras.
+
+# Exploratory Data Analysis
+
+Before model building, exploratory data analysis (EDA) was conducted for each outcome variable. The results showed that on-base percentage (OBP) was approximately normally distributed, while slugging percentage (SLG) exhibited a slight right-skewed distribution but was still treated as approximately normal overall. In contrast, home run counts (HR) displayed a substantially right-skewed distribution (Figure 1).
+
+```{R fig.cap= "Outcome distribution", fig.align="center",out.width="105%"}
+library(patchwork)
+p1=ggplot(cpbltrain,
+       aes(x=HR_tplus1))+
+  geom_histogram(bins=20)+
+  labs(
+    title="Distribution of HR",
+    x="HR",
+    y="Count"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )
+
+p2=ggplot(cpbltrain,
+       aes(x=OBP_tplus1))+
+  geom_histogram(bins=20)+
+  labs(
+    title="Distribution of OBP",
+    x="OBP",
+    y="Count"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )
+
+p3=ggplot(cpbltrain,
+       aes(x=SLG_tplus1))+
+  geom_histogram(bins=20)+
+  labs(
+    title="Distribution of SLG",
+    x="SLG",
+    y="Count"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )
+
+p2|p3|p1
+```
+
+These results are consistent with the nature of baseball statistics in the CPBL, where only a small number of hitters are capable of producing high home run totals. In comparison, OBP and SLG are ratio-based statistics that tend to exhibit more stable distributions when sufficient sample sizes are available.
+
+Because the HR distribution was strongly right-skewed, a log transformation was applied to the HR outcome variable in order to reduce the influence of extreme values and make the distribution closer to normality. Specifically, log1p(HR_tplus1) was used as the final outcome variable to avoid issues associated with taking the logarithm of zero home runs.
+
+Furthermore, Age demonstrated clear nonlinear relationships with each outcome variable (Figure 2). Therefore, natural spline (NS) transformations were applied, and the degrees of freedom were included as tuning parameters during model fitting.
+
+```{R fig.cap= "Age vs outcomes", fig.align="center",out.width="105%"}
+p4=ggplot(cpbltrain,
+       aes(x=Age, y=logHR_tplus1))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="loess")+
+  labs(
+    title="Age vs HR(Log)",
+    x="Age",
+    y="HR(Log)"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )+
+  theme_minimal()
+
+p5=ggplot(cpbltrain,
+       aes(x=Age, y=OBP_tplus1))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="loess")+
+  labs(
+    title="Age vs OBP",
+    x="Age",
+    y="OBP"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )+
+  theme_minimal()
+
+p6=ggplot(cpbltrain,
+       aes(x=Age, y=SLG_tplus1))+
+  geom_point(alpha=0.5)+
+  geom_smooth(method="loess")+
+  labs(
+    title="Age vs SLG",
+    x="Age",
+    y="SLG"
+  )+theme(
+    plot.title = element_text(size=10),
+    axis.title=element_text(size=8), 
+    axis.text=element_text(size=7)
+  )+
+  theme_minimal()
+
+p4|p5|p6
+```
+
+# Methods
+
+In this study, penalized regression models were used as the primary prediction methods, including Lasso, Ridge, and Elastic Net regression. These models are effective in handling multicollinearity among predictors and can reduce model variance through coefficient shrinkage, resulting in more stable predictions. In addition, these methods are well suited for continuous outcome prediction and were relatively familiar from an implementation perspective.
+
+Given the relatively limited sample size of this study, more complex machine learning approaches, such as random forests or other nonlinear methods, were not adopted in order to reduce the risk of overfitting.
+
+Because the dataset has a clear temporal structure, traditional k-fold cross-validation was not appropriate. Therefore, this study adopted rolling cross-validation. Specifically, the model was trained using progressively expanding training windows, such as using 2005–2006 data to predict 2007, then using 2005–2007 data to predict 2008, and so on. This approach more realistically reflects real-world forecasting scenarios involving time-ordered data.
+
+Since this study aimed to predict three different outcomes (HR, OBP, and SLG) using three different models (Lasso, Ridge, and Elastic Net), a total of nine models were constructed. Model selection was based on the RMSE obtained from rolling cross-validation, and the model with the lowest CV RMSE was selected as the final model for each outcome.
+
+For hyperparameter tuning, the penalty parameter (λ) was tuned for all penalized regression models, while the Elastic Net model additionally tuned the mixture parameter (α). The optimal combination of tuning parameters was selected automatically through cross-validation.
+
+The final selected models were then applied to the test set to calculate test RMSE. If the difference between test RMSE and CV RMSE was relatively small, the model was considered to have good generalization ability without substantial overfitting. The test set was used only for final model evaluation and was not involved in the model selection process. After validation, the final models were applied to the 2025 dataset to generate player projections for the 2026 CPBL season.
+
+# Preprocessing
+
+Regarding data preprocessing, no missing values were identified in the dataset. Therefore, the primary preprocessing step involved constructing the outcome variables. Since the goal of this study was to predict next-season performance, t+1 outcome variables were created for each player, including HR_tplus1, OBP_tplus1, and SLG_tplus1. This process was implemented using the lead() function in R, allowing each season’s data to be matched with the player’s performance in the following season as the prediction target.
+
+To ensure consistency of the outcome variables, only players who met the minimum playing-time threshold in consecutive seasons were retained in the final dataset. After preprocessing, the final training set contained 754 observations, while the test set and prediction set contained 160 and 76 observations, respectively.
+
+The dataset was divided as follows: data from 2005–2021 were used as the training set, data from 2022–2024 were used as the test set, and the 2025 season data were reserved as the prediction set for 2026 projections.
+
+# Feature Engineering
+
+After constructing the t+1 outcome variables (HR_tplus1, OBP_tplus1, and SLG_tplus1), multiple player performance statistics were used as predictors in this study, including traditional batting statistics (e.g., PA, AB, H, HR, OBP, SLG, and OPS) as well as baserunning and plate discipline variables (e.g., BB, SO, and SB). These variables were intended to capture overall offensive ability, power-hitting ability, and on-base skills.
+
+For the HR prediction model, additional feature engineering was performed to better characterize a player’s home run ability. The engineered variables included:
+•	ISO (Isolated Power): measures pure power-hitting ability and is highly associated with home run production
+•	HR rate (HR / PA): reflects home run frequency per plate appearance
+•	BB rate and SO rate: represent walk tendency and strikeout tendency, respectively, which together reflect plate discipline. Power hitters are generally associated with higher walk rates but may also exhibit higher strikeout rates due to aggressive hitting approaches
+•	XBH and XBH rate: measure extra-base hit ability and its frequency
+•	HR per H: proportion of hits that were home runs
+•	ISOHR (interaction term): calculated as ISO × HR to capture the interaction between power ability and actual home run production
+
+During pre-specify variable selection, predictors considered less relevant to HR prediction, such as stolen bases, hit-by-pitches, and grounded-into-double-play counts, were removed. In addition, variables that were highly redundant or already represented within other statistics, such as OBP and SLG, were excluded. Certain playing-time-related counting statistics, including PA and AB, were also removed to reduce redundancy.
+
+For the OBP prediction model, feature engineering focused primarily on capturing on-base ability and plate discipline. The engineered variables included:
+•	BB rate and SO rate: represent walk and strikeout tendencies, reflecting plate discipline
+•	BBK (BB / SO): measures the ratio of walks to strikeouts, where higher values generally indicate better plate discipline
+•	BABIP: batting average on balls in play, which is often considered less sensitive to random variation compared to traditional batting average
+•	wOBA-like: a weighted on-base metric that assigns different weights to offensive events and is intended to better capture overall offensive contribution compared to traditional OBP
+
+These variables were designed to characterize players’ on-base ability from multiple perspectives and provide greater explanatory value than traditional single statistics alone.
+
+During pre-specify variable selection, predictors with lower relevance to OBP prediction or high redundancy with other variables were removed. Examples included several counting statistics such as H, BB, and SO, as well as playing-time-related variables such as PA and AB, in order to reduce model redundancy and multicollinearity.
+
+For the SLG prediction model, feature engineering focused on capturing power-hitting ability and hitting quality. The engineered variables included:
+•	wRC-like: an approximate weighted run creation metric intended to reflect overall offensive value and power-hitting ability
+•	xBH ratio: proportion of extra-base hits (X2B + X3B + HR) among total hits, used to measure concentration of power hitting
+•	power_rate: a weighted power metric standardized by PA to reflect hitting efficiency
+
+Compared to traditional SLG alone, these engineered variables were intended to capture hitting quality and power ability from multiple perspectives.
+
+During pre-specify variable selection, predictors considered less relevant to SLG prediction, such as SB, CS, and HBP, were removed. In addition, playing-time-related counting variables such as PA and AB were excluded to avoid overemphasizing playing opportunities rather than true hitting ability.
+
+Finally, outcome-related variables from other models (e.g., HR_tplus1, OBP_tplus1, and SLG_tplus1) were removed from each corresponding model in order to prevent data leakage.
+
+# Model Building
+
+During the model-building process, hyperparameter tuning was performed for each model in order to identify the optimal model configuration.
+
+For the Lasso and Ridge models, the primary tuning parameter was the penalty parameter (λ). For the Elastic Net model, the mixture parameter (α) was additionally tuned to control the balance between Lasso and Ridge regularization.
+
+Furthermore, because Age demonstrated nonlinear relationships with the outcome variables, the degrees of freedom for the natural spline transformation were also included in the tuning process.
+
+Hyperparameter tuning was conducted using the tune_grid() function in the tidymodels framework. The tuning ranges were defined as follows:
+•	spline degrees of freedom: 1 to 5
+•	penalty parameter: from -5 to 0 on the log scale
+•	Elastic Net mixture parameter (α): 0 to 1
+
+The final model for each outcome variable was selected based on the RMSE obtained from rolling cross-validation, with the model yielding the lowest CV RMSE chosen as the optimal model.
+
+# Results
+
+After performing rolling cross-validation, the optimal model differed across outcome variables. Based on the CV RMSE results, Elastic Net regression was selected as the best model for HR prediction, while Ridge regression was selected as the best model for both OBP and SLG prediction. The CV RMSE results for all models are summarized in Table 1.
+
+```{R}
+table1=tibble(
+  Outcome=c("HR", "OBP", "SLG"),
+  Model=c("Elastic Net", "Ridge", "Ridge"),
+  CV_RMSE=c(0.6927, 0.0371, 0.0712))
+knitr::kable(table1, caption="Table1. Model Performance")
+```
+
+For the HR model, the optimal hyperparameter combination was penalty = 0.006, mixture parameter (α) = 0.44, and natural spline degrees of freedom = 1. For the OBP model, the optimal hyperparameters were penalty = 0.0152 and natural spline degrees of freedom = 1. For the SLG model, the optimal hyperparameters were penalty = 0.0774 and natural spline degrees of freedom = 1. The detailed tuning results are shown in Table 2.
+
+```{R}
+table2=tibble(
+  Outcome=c("HR", "OBP", "SLG"),
+  Model=c("Elastic Net", "Ridge", "Ridge"),
+  Penalty=c(0.006, 0.0152, 0.0774),
+  Alapha=c(0.44, 0, 0),
+  DF=c(1, 1, 1)
+)
+knitr::kable(table2, caption="Table2. Best Tuning Parameters")
+```
+
+In the HR Elastic Net model, the final retained predictors included X2B, HR, IBB, HR rate, BB rate, SO rate, xSLG, xBH rate, and ISOHR. Among these variables, HR rate had the largest coefficient, suggesting that home run frequency per plate appearance was the strongest predictor of next-season home run production. In addition, HR and X2B also showed positive effects, indicating that previous-season power-hitting performance remained associated with future home run production.
+
+Notably, several engineered variables originally included in the model, such as HR per H and ISO, were ultimately shrunk to zero coefficients. This suggests that these variables provided limited additional predictive information after other highly correlated predictors had already been included. This result also reflects the ability of Elastic Net regression to combine the variable selection property of Lasso regression with the stability of Ridge regression.
+
+In the OBP Ridge model, variables such as BBK, wOBA_like, and BB rate all demonstrated positive effects. BBK and BB rate reflected plate discipline and on-base ability, while wOBA_like further captured overall offensive contribution. In contrast, SO rate showed a negative coefficient, suggesting that higher strikeout tendencies may reduce a player’s ability to reach base. BABIP also displayed a negative coefficient. Although this finding differs somewhat from general baseball intuition, it may indicate that BABIP contributed limited additional information once other OBP-related variables had already been included in the model.
+
+Because Ridge regression does not shrink coefficients entirely to zero, most variables remained in the final model, although their relative effects varied across predictors.
+
+In the SLG Ridge model, most power-related variables showed positive effects, suggesting that the model successfully captured the relationship between power-hitting ability and next-season slugging percentage. Interestingly, X3B displayed a slightly negative coefficient. This result may reflect the fact that triples are influenced not only by power but also by speed, ballpark effects, and defensive positioning, making their relationship with SLG less direct compared to doubles or home runs. The coefficient estimates for all models are presented in Table 3.
+
+```{R}
+table3=tibble(
+  Outcome=c("HR", "HR", "HR", "OBP", "OBP", "OBP", "SLG", "SLG", "SLG"),
+  Important_Variable=c("HR rate", "HR", "X2B", "BB rate", "BBK", "SO rate", "Power rate", "ISO", "X3B"),
+  Coefficients=c(0.4897, 0.1576, 0.1278, 0.0057, 0.0045, -0.0006, 0.0072, 0.0079, -0.0001)
+  )
+knitr::kable(table3, caption="Table3. Important Variables")
+```
+
+The selected final models were then applied to the test set in order to evaluate generalization ability on unseen data. The results are shown in Table 4.
+
+```{R}
+table4=tibble(
+  Outcome=c("HR", "OBP", "SLG"),
+  Model=c("Elastic Net", "Ridge", "Ridge"),
+Test_RMSE=c(0.6634, 0.0375, 0.0638),
+  Test_RSQ=c(0.3555, 0.2034, 0.2519)
+)
+knitr::kable(table4, caption="Table4. Test Performance")
+```
+
+Overall, the RMSE values obtained from the test set were similar to those obtained from rolling cross-validation, suggesting that substantial overfitting was not observed and that the models demonstrated reasonable predictive stability.
+
+For the HR model, the test RMSE was 0.66 with an R² value of 0.36. For the OBP model, the test RMSE was 0.038 with an R² value of 0.20. For the SLG model, the test RMSE was 0.064 with an R² value of 0.25.
+
+Figure 7 illustrates the relationship between actual and predicted home run values on the test set. A moderate positive linear relationship was observed, indicating that the model was able to capture the general trend of player home run performance. In particular, most observations within the moderate home run range were distributed near the 45-degree reference line, suggesting relatively stable predictive performance in this range.
+
+```{R,fig.cap= "Actual HR vs Predicted HR in log Scale", fig.align="center", out.width="60%"}
+
+ggplot(hr_pred, 
+       aes(x=logHR_tplus1,
+           y=.pred))+
+  geom_point(alpha=0.7)+
+  geom_abline(
+    slope=1,
+    intercept=0,
+    linetype="dashed"
+  )+
+  labs(
+    title="Actual vs Predicted log_HR",
+    x="Actual log_HR",
+    y="Predicted log_HR"
+  ) +
+  theme_minimal()
+```
+
+However, the model tended to slightly overestimate players with low home run totals while underestimating players with very high home run totals. This pattern may be related to the shrinkage effect of penalized regression models, which tend to pull extreme values toward the overall mean during prediction. In addition, factors such as player injuries, playing time, and seasonal variation may further contribute to prediction difficulty among high-home-run players.
+
+Although some models did not achieve particularly high R² values, these results remain acceptable within the context of baseball forecasting, where player performance is inherently highly variable and strongly influenced by injuries, playing opportunities, and other uncontrollable factors. Furthermore, this study used three seasons (2022–2024) as the test set, which provides a more stable evaluation of out-of-sample performance compared to relying on a single season alone.
+
+Table 5 presents the final player projections for the 2026 CPBL season generated from the selected models.
+
+```{R}
+table5=final_2026 |>
+  dplyr::arrange(desc(hr_pred)) |>
+  dplyr::slice(1:10) |>
+  dplyr::select(Name, hr_pred, obp_pred, slg_pred, ops_pred)
+
+knitr::kable(table5, caption="Table5. 2026 Players Projections")
+```
+
+In the HR projections, Steven Moya remained the top-ranked home run hitter, which is consistent with his performance as the league’s home run leader over the previous two seasons. In addition, he also ranked first in projected OPS, suggesting that the model considered him to possess the strongest overall offensive ability entering the 2026 season.
+
+However, several players initially received relatively low projected home run totals. Further examination suggested that some players, particularly domestic hitters, experienced reduced playing time in recent seasons due to injuries. As a result, models relying on previous-season statistics may have underestimated their true power-hitting ability.
+
+To address this issue, an additional “fixed playing-time” scenario was constructed by setting all players’ PA values to 450 in order to simulate a healthy full-season environment for starting players. The corresponding results are shown in Table 6.
+
+```{R}
+table6=final_2026_hrstd |>
+  dplyr::arrange(desc(hr_std)) |>
+  dplyr::slice(1:10) |>
+  dplyr::select(Name, hr_std, obp_pred, slg_pred, ops_pred)
+
+knitr::kable(table6, caption="Table6. 2026 Players Projections with PA 450")
+```
+
+Under this scenario, Steven Moya still remained the projected home run leader, but the number of players projected to reach double-digit home run totals increased substantially. This adjustment produced projections that more closely resembled the actual distribution of home run totals typically observed in the CPBL. The results also highlight the substantial influence of playing time on cumulative home run production.
+
+# Conclusion
+
+Although the CPBL currently lacks a preseason player projection system comparable to Fangraphs, the results of this study demonstrate that statistical models can still be used to develop a reasonably effective player forecasting system even under relatively limited data conditions.
+
+Beyond satisfying my personal interest in baseball analytics, this study also aimed to provide a preseason reference framework for player evaluation. Through the projection results generated by the models, fans, analysts, and even team management may gain a more systematic basis for comparing players’ potential performance, power-hitting ability, and overall offensive value.
+
+Nevertheless, several limitations remain in this study. First, publicly available advanced statistics in the CPBL are still relatively limited. Important Statcast-type metrics, such as exit velocity, launch angle, and barrel rate, are currently difficult to obtain, restricting the range of predictors available for modeling. In addition, factors such as player injuries, playing opportunities, and managerial decisions may substantially affect player performance, yet these factors are difficult to fully incorporate into the current models. As a result, some players may still be under- or overestimated in the final projections.
+
+Furthermore, the feature engineering and variable selection processes used in this study involve a certain degree of subjectivity. Different researchers may construct different advanced metrics and feature combinations based on varying baseball theories and analytical perspectives, which may ultimately influence model performance and projection results.
+
+Future research may benefit from incorporating more comprehensive advanced statistics and exploring Bayesian models or other dynamically updating approaches, allowing projection systems to continuously update throughout the season and potentially improve real-time predictive performance.
+
+In conclusion, this study successfully developed a preseason projection model centered on CPBL hitters and established a prediction framework with reasonable stability and generalization ability through rolling cross-validation and penalized regression methods. From the perspective of Taiwanese baseball analytics, this study also provides an initial direction for future research, demonstrating the potential usefulness of statistical modeling in baseball analysis and player evaluation.
