@@ -1,6 +1,6 @@
-# CPBL Hitter Projection System
+# CPBL Hitter Projection System for 2026 season
 
-This project develops a preseason projection system for CPBL hitters using historical player statistics from Baseball Reference.
+This project develops a preseason projection system for CPBL hitters using historical(2005-2025) player statistics from Baseball Reference.
 
 The goal is to predict:
 
@@ -8,6 +8,8 @@ The goal is to predict:
 - On-Base Percentage (OBP)
 - Slugging Percentage (SLG)
 - OPS
+
+for 2026 season
 
 ## Methods
 
